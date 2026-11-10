@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""
+recoller_gui.py
+Fenêtre pour recoller les morceaux video.mp4.001, video.mp4.002, ...
+Choisissez le dossier qui contient les morceaux, puis cliquez sur Recoller.
+Si manifest.json est présent dans ce dossier, le SHA-256 est vérifié.
+"""
+import glob
+import hashlib
+import json
+import os
+import re
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+CHUNK = 8 * 1024 * 1024
+
+
+def find_series(folder):
+    """Renvoie (nom_original, liste_des_morceaux_triés) ou (None, [])."""
+    parts = sorted(glob.glob(os.path.join(folder, "*.[0-9][0-9][0-9]")))
+    if not parts:
+        return None, []
+    original = re.sub(r"\.\d{3}$", "", os.path.basename(parts[0]))
+    series = [p for p in parts
+              if re.sub(r"\.\d{3}$", "", os.path.basename(p)) == original]
+    return original, series
+
+
+def recoller(folder, log):
+    original, series = find_series(folder)
+    if not original:
+        raise RuntimeError("Aucun morceau trouvé (fichiers du type nom.001, nom.002...).")
+
+    names = [os.path.basename(p) for p in series]
+    expected = [f"{original}.{i:03d}" for i in range(1, len(series) + 1)]
+    if names != expected:
+        raise RuntimeError(f"Morceaux manquants ou mal nommés.\nTrouvés : {names}")
+
+    out = os.path.join(folder, original)
+    if os.path.exists(out):
+        raise RuntimeError(f"Le fichier {original} existe déjà dans ce dossier.\n"
+                           "Supprimez-le ou renommez-le, puis relancez.")
+
+    log(f"{len(series)} morceaux trouvés. Recollage dans {original}...")
+    h = hashlib.sha256()
+    with open(out, "wb") as dst:
+        for p in series:
+            log(f"  ajout de {os.path.basename(p)}")
+            with open(p, "rb") as src:
+                while chunk := src.read(CHUNK):
+                    dst.write(chunk)
+                    h.update(chunk)
+    log(f"Fichier reconstruit : {out}")
+
+    manifest = os.path.join(folder, "manifest.json")
+    if os.path.exists(manifest):
+        with open(manifest, encoding="utf-8") as f:
+            expected_hash = json.load(f).get("sha256")
+        if h.hexdigest() == expected_hash:
+            log("Vérification SHA-256 : OK, la vidéo est intacte.")
+        else:
+            log("Vérification SHA-256 : ERREUR, le fichier est corrompu.")
+    else:
+        log("Pas de manifest.json : vérification non effectuée.")
+    return out
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.folder = ""
+        self.q_msgs = []
+        root.title("Recoller une vidéo en morceaux")
+        root.geometry("650x400")
+
+        frm = tk.Frame(root, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        row = tk.Frame(frm)
+        row.pack(fill="x")
+        tk.Button(row, text="Choisir le dossier...", command=self.choose).pack(side="left")
+        self.folder_label = tk.Label(row, text="Aucun dossier choisi", anchor="w")
+        self.folder_label.pack(side="left", padx=10, fill="x", expand=True)
+
+        self.start_btn = tk.Button(frm, text="Recoller la vidéo", command=self.start,
+                                   bg="#1565c0", fg="white", height=2)
+        self.start_btn.pack(fill="x", pady=10)
+
+        self.bar = ttk.Progressbar(frm, mode="indeterminate")
+        self.bar.pack(fill="x")
+
+        self.log_box = scrolledtext.ScrolledText(frm, height=14, state="disabled")
+        self.log_box.pack(fill="both", expand=True, pady=(10, 0))
+
+    def choose(self):
+        path = filedialog.askdirectory(parent=self.root,
+                                       title="Dossier contenant les morceaux")
+        if path:
+            self.folder = path
+            self.folder_label.config(text=path)
+
+    def start(self):
+        if not self.folder:
+            messagebox.showwarning("Dossier manquant", "Choisissez le dossier.", parent=self.root)
+            return
+        self.start_btn.config(state="disabled")
+        self.bar.start(12)
+        self.clear_log()
+        threading.Thread(target=self.worker, daemon=True).start()
+
+    def worker(self):
+        try:
+            out = recoller(self.folder, self.write_safe)
+            self.root.after(0, self.done, f"Vidéo recollée :\n{out}")
+        except Exception as e:
+            self.root.after(0, self.done, None, str(e))
+
+    def done(self, ok_msg=None, err=None):
+        self.bar.stop()
+        self.start_btn.config(state="normal")
+        if err:
+            self.write(f"ERREUR : {err}")
+            messagebox.showerror("Erreur", err, parent=self.root)
+        else:
+            messagebox.showinfo("Terminé", ok_msg, parent=self.root)
+
+    def write_safe(self, text):
+        self.root.after(0, self.write, text)
+
+    def write(self, text):
+        self.log_box.config(state="normal")
+        self.log_box.insert("end", text + "\n")
+        self.log_box.see("end")
+        self.log_box.config(state="disabled")
+
+    def clear_log(self):
+        self.log_box.config(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.config(state="disabled")
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
